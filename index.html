@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <title>Bevy WebGPU Demo</title>
+    <style>
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: black;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="webgpu-status"
+        style="position: absolute; top: 10px; right: 10px; color: white; font-family: monospace; font-size: 16px; background: rgba(0,0,0,0.5); padding: 5px;">
+        Checking WebGPU Support...
+    </div>
+    <div id="bevy-status"
+        style="position: absolute; top: 40px; right: 10px; color: white; font-family: monospace; font-size: 16px; background: rgba(0,0,0,0.5); padding: 5px;">
+        Bevy Status: Waiting...
+    </div>
+    <!-- CSS Debug: Red background to see if canvas is transparent or not loaded -->
+    <canvas id="bevy-canvas" style="background-color: red;"></canvas>
+    <script>
+        // Check for WebGPU support in the browser
+        const statusDiv = document.getElementById('webgpu-status');
+        if ('gpu' in navigator) {
+            statusDiv.textContent = "Browser WebGPU Support: YES (Checking Adapter...)";
+            statusDiv.style.color = "#FFFF00";
+
+            navigator.gpu.requestAdapter().then(adapter => {
+                if (adapter) {
+                    console.log("JS Diagnostic: WebGPU Adapter Found:", adapter.info);
+                    statusDiv.textContent = "Browser WebGPU Support: YES (Adapter Found)";
+                    statusDiv.style.color = "#00FF00";
+                } else {
+                    console.error("JS Diagnostic: WebGPU Adapter Request returned null.");
+                    statusDiv.textContent = "Browser WebGPU Support: YES (Adapter Request Failed)";
+                    statusDiv.style.color = "#FF0000";
+                }
+            }).catch(e => {
+                console.error("JS Diagnostic: WebGPU Adapter Error:", e);
+                statusDiv.textContent = "Browser WebGPU Support: YES (Adapter Error)";
+                statusDiv.style.color = "#FF0000";
+            });
+        } else {
+            console.error("JS Diagnostic: navigator.gpu undefined");
+            statusDiv.textContent = "Browser WebGPU Support: NO (Using Fallback)";
+            statusDiv.style.color = "#FF0000";
+        }
+    </script>
+    <script type="module">
+        import init from './target/wasm32-unknown-unknown/release/bevy_webgpu_demo.js';
+        init().catch((error) => {
+            if (!error.message.startsWith("Using exceptions for control flow,")) {
+                throw error;
+            }
+        });
+    </script>
+</body>
+
+</html>
