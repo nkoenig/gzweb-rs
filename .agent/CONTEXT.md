@@ -26,7 +26,7 @@ The application is designed to run **both in a web browser (WebAssembly/WASM) an
 | JS/WASM bridge | `wasm-bindgen`, `web-sys`, `js-sys` | 0.2/0.3 |
 | Protobuf decode | `prost` | 0.13 |
 | Serialisation | `serde` + `serde_json` | 1.0 |
-| Camera controls | `bevy_panorbit_camera` | 0.21 |
+| Camera controls | `bevy_panorbit_camera` | 0.21.0 |
 | Native WebSocket | `tungstenite` | 0.26 |
 | Channel (threading) | `crossbeam-channel` | 0.5 |
 | UUID generation | `uuid` (v4 + js feature) | 1.21 |
