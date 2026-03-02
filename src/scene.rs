@@ -486,7 +486,7 @@ fn final_transform_with_scale(visual: &gz_msgs::Visual, base: Transform) -> Tran
 ///      - *WASM*:   any Fuel URI → `fuel://` (HTTP fetch — no filesystem access)
 ///   2. **`file://` URIs** — dispatched by platform:
 ///      - *Native*: stripped to bare filesystem path
-///      - *WASM*:   **unsupported** — logs a warning and returns empty string
+///      - *WASM*:   converted to `wsasset://` to be proxied over WebSocket
 ///   3. Everything else is passed through unchanged.
 fn resolve_mesh_uri(filename: &str) -> String {
     // ── Fuel assets ──────────────────────────────────────────────────────
