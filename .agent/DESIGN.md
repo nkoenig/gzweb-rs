@@ -194,8 +194,8 @@ gz::Scene
 External mesh files are loaded asynchronously via Bevy's `AssetServer`.
 
 **Plugins registered** (in `main.rs`):
-- `bevy_obj::ObjPlugin` — Wavefront OBJ + MTL loader (v0.15.1)
-- `bevy_stl::StlPlugin` — STL loader (v0.15.0)
+- `bevy_obj::ObjPlugin` — Wavefront OBJ + MTL loader (v0.18.2)
+- `bevy_stl::StlPlugin` — STL loader (v0.18.0)
 - glTF/GLB is built into `DefaultPlugins` (`bevy_gltf`)
 
 **URI resolution** (`resolve_mesh_uri` in `scene.rs`):
