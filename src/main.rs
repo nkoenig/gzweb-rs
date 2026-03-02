@@ -11,6 +11,8 @@ use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 mod gz_msgs;
 mod websocket;
 mod scene;
+mod fuel;
+mod asset_proxy;
 use websocket::*;
 use scene::*;
 
@@ -45,7 +47,7 @@ fn main() {
                             "Bevy Panic: Unknown Error".to_string()
                         };
                         let _ = element.set_inner_html(&msg);
-                        let _ = element.set_attribute("style", "position: absolute; top: 40px; right: 10px; color: white; font-family: monospace; font-size: 16px; background: red; padding: 5px;");
+                        let _ = element.set_attribute("style", "position: absolute; top: 40px; right: 10px; color: white; font-family: monospace; font-size: 16px; background: black; padding: 5px;");
                     }
                 }
             }
@@ -53,9 +55,11 @@ fn main() {
     }));
 
     App::new()
+        .add_plugins(fuel::FuelPlugin) // Must be before DefaultPlugins (registers asset source)
+        .add_plugins(asset_proxy::AssetProxyPlugin) // Must be before DefaultPlugins (registers wsasset:// source)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Bevy WebGPU Demo".into(),
+                title: "Gazebo Web - WebGPU".into(),
                 canvas: Some("#bevy-canvas".into()),
                 fit_canvas_to_parent: true,
                 prevent_default_event_handling: false,
@@ -69,10 +73,12 @@ fn main() {
         }))
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(PanOrbitCameraPlugin)
-        .insert_resource(ClearColor(Color::srgb(0.1, 0.1, 0.15))) // Dark background until scene loads
+        .add_plugins(bevy_obj::ObjPlugin)
+        .add_plugins(bevy_stl::StlPlugin)
+        .insert_resource(ClearColor(Color::WHITE)) // White background until scene loads
         .init_resource::<SceneState>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (update_fps, update_adapter_info, update_dom_status, update_orbit_focus, update_websocket_status, process_scene))
+        .add_systems(Update, (update_fps, update_adapter_info, update_dom_status, update_orbit_focus, update_websocket_status, process_scene, apply_dynamic_poses))
         .add_systems(Startup, setup_websocket_system) // Separate system to ensuring it runs
         .run();
 }
@@ -102,14 +108,20 @@ fn setup(
     }
 
     // Default ambient light until the scene data arrives
-    commands.insert_resource(AmbientLight {
+    commands.insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
         brightness: 200.0,
+        affects_lightmapped_meshes: true,
     });
 
     // 3D Camera with PanOrbitCamera
     commands.spawn((
         Camera3d::default(),
+        Camera {
+            // Explicitly set to white — overrides the default dark clear color.
+            clear_color: ClearColorConfig::Custom(Color::WHITE),
+            ..default()
+        },
         Transform::from_xyz(0.0, 5.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
         PanOrbitCamera {
             button_orbit: MouseButton::Left,
@@ -192,13 +204,15 @@ fn update_orbit_focus(
     windows: Query<&Window>,
     mouse_input: Res<ButtonInput<MouseButton>>,
 ) {
-    let Ok(window) = windows.get_single() else {
+    let Ok(window) = windows.single() else {
         return;
     };
 
     if mouse_input.just_pressed(MouseButton::Left) {
         if let Some(cursor_position) = window.cursor_position() {
-            let (mut pan_orbit, camera, camera_transform) = camera_query.single_mut();
+            let Ok((mut pan_orbit, camera, camera_transform)) = camera_query.single_mut() else {
+                return;
+            };
             
             // Calculate a ray from the cursor
             let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_position) else {

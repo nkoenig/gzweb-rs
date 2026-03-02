@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::scene::SceneRoot;
 use prost::Message;
 
 use crate::gz_msgs;
@@ -7,7 +8,6 @@ use crate::websocket::GzWebSocket;
 /// Marker component for entities spawned from the Gazebo scene.
 #[derive(Component)]
 pub struct GzSceneEntity {
-    #[allow(dead_code)]
     pub gz_name: String,
 }
 
@@ -28,6 +28,9 @@ pub fn process_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut scene_state: ResMut<SceneState>,
+    asset_server: Res<AssetServer>,
+    mut pending_ws: ResMut<crate::asset_proxy::PendingWsAssetRequests>,
+    mut camera_query: Query<&mut Camera>,
 ) {
     let Some(mut ws) = websocket else { return };
 
@@ -38,7 +41,7 @@ pub fn process_scene(
 
     // Step 1: Once protos are received, request worlds
     if ws.protos.is_some() && !scene_state.worlds_requested {
-        let request = serde_json::json!(["worlds", "", "", ""]).to_string();
+        let request = "worlds,,,".to_string();
         match ws.send_message(&request) {
             Ok(_) => {
                 info!("Sent worlds request");
@@ -51,15 +54,24 @@ pub fn process_scene(
     }
 
     // Step 2: Once world name is received, request scene
-    if let Some(ref world_name) = scene_state.world_name {
+    if let Some(world_name) = scene_state.world_name.clone() {
         if !scene_state.scene_requested {
-            let request =
-                serde_json::json!(["scene", world_name, "", ""]).to_string();
+            let request = format!("scene,{},,", world_name);
             match ws.send_message(&request) {
                 Ok(_) => {
                     info!("Sent scene request for world: {}", world_name);
                     scene_state.scene_requested = true;
                     ws.status = "Requesting Scene...".to_string();
+
+                    // Step 2.1: Subscribe to scene/info and dynamic_pose/info
+                    let scene_topic = format!("/world/{}/scene/info", world_name);
+                    let sub_scene = format!("sub,{},,", scene_topic);
+                    let _ = ws.send_message(&sub_scene);
+
+                    let pose_topic = format!("/world/{}/dynamic_pose/info", world_name);
+                    let sub_pose = format!("sub,{},,", pose_topic);
+                    let _ = ws.send_message(&sub_pose);
+                    info!("Subscribed to scene and dynamic_pose topics");
                 }
                 Err(e) => error!("Failed to send scene request: {}", e),
             }
@@ -78,19 +90,28 @@ pub fn process_scene(
                     scene.model.len(),
                     scene.light.len()
                 );
-                debug!("Decoded Scene message: {:#?}", scene);
+                info!("Decoded Scene message: {:#?}", scene);
 
                 // Set ambient light from scene
                 if let Some(ambient) = &scene.ambient {
-                    commands.insert_resource(AmbientLight {
+                    commands.insert_resource(GlobalAmbientLight {
                         color: gz_color_to_bevy(ambient),
                         brightness: 300.0,
+                        affects_lightmapped_meshes: true,
                     });
                 }
 
-                // Set background color
+                // Only update background if the scene explicitly specifies one.
+                // Proto3 defaults Color to all-zeros (r=0, g=0, b=0, a=0), so a==0 means unset.
                 if let Some(bg) = &scene.background {
-                    commands.insert_resource(ClearColor(gz_color_to_bevy(bg)));
+                    if bg.a > 0.0 {
+                        let color = gz_color_to_bevy(bg);
+                        commands.insert_resource(ClearColor(color));
+                        // Also update the camera's explicit clear color
+                        camera_query.iter_mut().for_each(|mut cam| {
+                            cam.clear_color = ClearColorConfig::Custom(color);
+                        });
+                    }
                 }
 
                 // Spawn lights
@@ -104,6 +125,8 @@ pub fn process_scene(
                         &mut commands,
                         &mut meshes,
                         &mut materials,
+                        &asset_server,
+                        &mut pending_ws,
                         model,
                         Transform::IDENTITY,
                     );
@@ -117,6 +140,35 @@ pub fn process_scene(
                 error!("Failed to decode Scene protobuf: {:?}", e);
                 ws.status = format!("Scene Decode Error: {}", e);
             }
+        }
+    }
+}
+
+/// Bevy system: drains dynamic pose updates from the websocket buffer and applies
+/// them to the matching Gazebo entities by name.
+pub fn apply_dynamic_poses(
+    ws: Option<NonSendMut<GzWebSocket>>,
+    mut query: Query<(&GzSceneEntity, &mut Transform)>,
+) {
+    let Some(mut ws) = ws else { return };
+    if ws.dynamic_poses.is_empty() {
+        return;
+    }
+
+    let poses = std::mem::take(&mut ws.dynamic_poses);
+    for pose in &poses {
+        let mut found = false;
+        for (entity, mut transform) in query.iter_mut() {
+            // Match by exact name or by the last segment after '::' (link name within model)
+            if entity.gz_name == pose.name {
+                transform.translation = pose.translation;
+                transform.rotation = pose.rotation;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            // Entity not yet spawned or name mismatch — silently ignore
         }
     }
 }
@@ -168,7 +220,8 @@ fn spawn_light(commands: &mut Commands, light: &gz_msgs::Light, parent_transform
             // Directional lights use the transform's forward direction
             let mut dir_transform = transform;
             if let Some(dir) = &light.direction {
-                let direction = Vec3::new(dir.x as f32, dir.y as f32, dir.z as f32);
+                // Swap Y/Z for Gazebo Z-up → Bevy Y-up
+                let direction = Vec3::new(dir.x as f32, dir.z as f32, -dir.y as f32);
                 if direction.length_squared() > 0.0 {
                     dir_transform =
                         Transform::from_translation(dir_transform.translation)
@@ -220,6 +273,8 @@ fn spawn_model(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
+    asset_server: &Res<AssetServer>,
+    pending_ws: &mut ResMut<crate::asset_proxy::PendingWsAssetRequests>,
     model: &gz_msgs::Model,
     parent_transform: Transform,
 ) {
@@ -240,7 +295,7 @@ fn spawn_model(
 
     // Process model-level visuals
     for visual in &model.visual {
-        spawn_visual(commands, meshes, materials, visual, model_transform);
+        spawn_visual(commands, meshes, materials, asset_server, pending_ws, visual, model_transform);
     }
 
     // Process links
@@ -249,7 +304,7 @@ fn spawn_model(
             combine_transforms(model_transform, gz_pose_to_transform(link.pose.as_ref()));
 
         for visual in &link.visual {
-            spawn_visual(commands, meshes, materials, visual, link_transform);
+            spawn_visual(commands, meshes, materials, asset_server, pending_ws, visual, link_transform);
         }
 
         // Lights attached to links
@@ -260,7 +315,7 @@ fn spawn_model(
 
     // Process nested models recursively
     for nested_model in &model.model {
-        spawn_model(commands, meshes, materials, nested_model, model_transform);
+        spawn_model(commands, meshes, materials, asset_server, pending_ws, nested_model, model_transform);
     }
 }
 
@@ -270,12 +325,15 @@ fn spawn_visual(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
+    asset_server: &Res<AssetServer>,
+    pending_ws: &mut ResMut<crate::asset_proxy::PendingWsAssetRequests>,
     visual: &gz_msgs::Visual,
     parent_transform: Transform,
 ) {
-    if !visual.visible && visual.id != 0 {
-        // If id == 0, it's likely a default value and visible was just unset
-        // Only skip if explicitly set to invisible
+    // In proto3, `visible` defaults to `false` when unset — we cannot
+    // distinguish "explicitly hidden" from "not set". Only skip visuals
+    // that are explicitly marked for deletion.
+    if visual.delete_me {
         return;
     }
 
@@ -294,10 +352,11 @@ fn spawn_visual(
         gz_msgs::geometry::Type::Box => {
             if let Some(box_geom) = &geometry.r#box {
                 if let Some(size) = &box_geom.size {
+                    // Swap Y/Z: Gazebo Z (height) → Bevy Y (height)
                     Some(meshes.add(Cuboid::new(
                         size.x as f32,
-                        size.y as f32,
                         size.z as f32,
+                        size.y as f32,
                     )))
                 } else {
                     Some(meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
@@ -324,6 +383,9 @@ fn spawn_visual(
             if let Some(plane) = &geometry.plane {
                 let size_x = plane.size.as_ref().map(|s| s.x as f32).unwrap_or(10.0);
                 let size_y = plane.size.as_ref().map(|s| s.y as f32).unwrap_or(10.0);
+                // Gazebo Plane normal is Z-up (0,0,1).
+                // Bevy Plane3d default is Y-up (0,1,0).
+                // Since we swap Y and Z in our pose transform, we can just use the default Bevy plane.
                 Some(meshes.add(Plane3d::default().mesh().size(size_x, size_y)))
             } else {
                 Some(meshes.add(Plane3d::default().mesh().size(10.0, 10.0)))
@@ -345,12 +407,23 @@ fn spawn_visual(
         }
         gz_msgs::geometry::Type::Mesh => {
             if let Some(mesh_geom) = &geometry.mesh {
-                info!(
-                    "Visual '{}': Mesh geometry '{}' (mesh loading not yet implemented)",
-                    visual.name, mesh_geom.filename
+                spawn_mesh_visual(
+                    commands,
+                    meshes,
+                    materials,
+                    asset_server,
+                    pending_ws,
+                    &mesh_geom.filename,
+                    &visual.name,
+                    visual.material.as_ref(),
+                    visual.transparency,
+                    final_transform_with_scale(visual, visual_transform),
                 );
+            } else {
+                warn!("Visual '{}': Mesh geometry has no filename", visual.name);
             }
-            None
+            // mesh visuals are handled separately — return early.
+            return;
         }
         _ => {
             info!(
@@ -368,10 +441,11 @@ fn spawn_visual(
         // Apply scale from visual if present
         let mut final_transform = visual_transform;
         if let Some(scale) = &visual.scale {
+            // Swap Y/Z for Gazebo Z-up → Bevy Y-up
             final_transform.scale = Vec3::new(
                 scale.x as f32 * final_transform.scale.x,
-                scale.y as f32 * final_transform.scale.y,
-                scale.z as f32 * final_transform.scale.z,
+                scale.z as f32 * final_transform.scale.y,
+                scale.y as f32 * final_transform.scale.z,
             );
         }
 
@@ -387,6 +461,204 @@ fn spawn_visual(
     }
 }
 
+// ===== Mesh visual helpers =====
+
+/// Applies visual scale to a transform and returns the final transform.
+fn final_transform_with_scale(visual: &gz_msgs::Visual, base: Transform) -> Transform {
+    let mut t = base;
+    if let Some(scale) = &visual.scale {
+        // Swap Y/Z for Gazebo Z-up → Bevy Y-up
+        t.scale = Vec3::new(
+            scale.x as f32 * t.scale.x,
+            scale.z as f32 * t.scale.y,
+            scale.y as f32 * t.scale.z,
+        );
+    }
+    t
+}
+
+/// Converts a Gazebo mesh URI to a path the `AssetServer` can load.
+///
+/// Resolution order:
+///   1. **Fuel URIs** — dispatched by platform:
+///      - *Native*: local Fuel cache paths → bare filesystem path (fast, no HTTP)
+///      - *Native*: Fuel HTTPS URLs → `fuel://` (HTTP fetch via `FuelAssetReader`)
+///      - *WASM*:   any Fuel URI → `fuel://` (HTTP fetch — no filesystem access)
+///   2. **`file://` URIs** — dispatched by platform:
+///      - *Native*: stripped to bare filesystem path
+///      - *WASM*:   **unsupported** — logs a warning and returns empty string
+///   3. Everything else is passed through unchanged.
+fn resolve_mesh_uri(filename: &str) -> String {
+    // ── Fuel assets ──────────────────────────────────────────────────────
+    if crate::fuel::is_fuel_uri(filename) {
+        // On native, if this is a local filesystem path to a cached Fuel
+        // asset, read directly from disk (much faster than HTTP).
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if !filename.starts_with("https://") && !filename.starts_with("http://") {
+                // Local path like /home/user/.gazebo/fuel/fuel.gazebosim.org/…
+                // Strip file:// prefix if present, then pass as bare path.
+                let path = filename.strip_prefix("file://").unwrap_or(filename);
+                if path.starts_with('/') {
+                    return path.to_string();
+                }
+                return format!("/{}", path);
+            }
+        }
+        // WASM or HTTPS URL — always fetch over HTTP via FuelAssetReader
+        return crate::fuel::create_fuel_asset_path(filename);
+    }
+
+    // ── file:// URIs (non-Fuel) ──────────────────────────────────────────
+    if let Some(path) = filename.strip_prefix("file://") {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if path.starts_with('/') {
+                return path.to_string();
+            }
+            return format!("/{}", path);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // WASM: no filesystem access. Route through the WebSocket asset
+            // proxy via the custom "wsasset" AssetSource.
+            return format!("wsasset://{}", path);
+        }
+    }
+
+    // ── Bare / relative paths ────────────────────────────────────────────
+    filename.to_string()
+}
+
+/// Detects the mesh format by file extension and spawns the appropriate Bevy entity.
+///
+/// | Extension        | Strategy                                        |
+/// |------------------|-------------------------------------------------|
+/// | .glb / .gltf     | `SceneRoot` via async `AssetServer` load        |
+/// | .stl             | `Mesh3d` via async `AssetServer` load           |
+/// | .obj             | `SceneRoot` via async `AssetServer` load        |
+/// | .dae (Collada)   | Pink placeholder `Cuboid` + warning             |
+/// | unknown          | Warning log, no entity spawned                  |
+#[allow(clippy::too_many_arguments)]
+fn spawn_mesh_visual(
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+    asset_server: &Res<AssetServer>,
+    pending_ws: &mut ResMut<crate::asset_proxy::PendingWsAssetRequests>,
+    filename: &str,
+    visual_name: &str,
+    material: Option<&gz_msgs::Material>,
+    transparency: f64,
+    transform: Transform,
+) {
+    let asset_path = resolve_mesh_uri(filename);
+
+    // Empty path means the URI is unsupported on this platform.
+    if asset_path.is_empty() {
+        return;
+    }
+
+    // On WASM, register the original file:// URI as a pending WebSocket
+    // request so the asset proxy system can request it from the server.
+    if asset_path.starts_with("wsasset://") {
+        let original_uri = filename.to_string();
+        if !pending_ws.requests.contains_key(&original_uri) {
+            info!("Queueing WebSocket asset request for '{}'", original_uri);
+            pending_ws.requests.insert(original_uri, false);
+        }
+    }
+
+    let ext = std::path::Path::new(&asset_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    info!(
+        "Visual '{}': loading mesh '{}' (resolved: '{}', format: '{}')",
+        visual_name, filename, asset_path, ext
+    );
+
+    match ext.as_str() {
+        // ── glTF / GLB ──────────────────────────────────────────────────────
+        "glb" | "gltf" => {
+            // Load the first scene in the file.
+            let scene_handle: Handle<Scene> =
+                asset_server.load(format!("{}#Scene0", asset_path));
+            commands.spawn((
+                SceneRoot(scene_handle),
+                transform,
+                GzSceneEntity {
+                    gz_name: visual_name.to_string(),
+                },
+            ));
+            info!("Spawned glTF/GLB SceneRoot for '{}'", visual_name);
+        }
+
+        // ── STL ─────────────────────────────────────────────────────────────
+        "stl" => {
+            let mesh_handle: Handle<Mesh> = asset_server.load(asset_path);
+            let mat = gz_material_to_bevy(material, transparency);
+            let mat_handle = materials.add(mat);
+            commands.spawn((
+                Mesh3d(mesh_handle),
+                MeshMaterial3d(mat_handle),
+                transform,
+                GzSceneEntity {
+                    gz_name: visual_name.to_string(),
+                },
+            ));
+            info!("Spawned STL Mesh3d for '{}'", visual_name);
+        }
+
+        // ── OBJ ─────────────────────────────────────────────────────────────
+        "obj" => {
+            // bevy_obj with the `scene` feature loads OBJ + MTL as a Scene.
+            let scene_handle: Handle<Scene> = asset_server.load(asset_path);
+            commands.spawn((
+                SceneRoot(scene_handle),
+                transform,
+                GzSceneEntity {
+                    gz_name: visual_name.to_string(),
+                },
+            ));
+            info!("Spawned OBJ SceneRoot for '{}'", visual_name);
+        }
+
+        // ── Collada (DAE) — not natively supported ───────────────────────────
+        "dae" => {
+            warn!(
+                "Visual '{}': Collada (.dae) is not natively supported. \
+                 Rendering a pink placeholder. Convert to glTF for proper display. (file: '{}')",
+                visual_name, filename
+            );
+            let placeholder = meshes.add(Cuboid::new(0.5, 0.5, 0.5));
+            let placeholder_mat = materials.add(StandardMaterial {
+                base_color: Color::srgb(1.0, 0.08, 0.58), // Hot pink
+                unlit: true,
+                ..default()
+            });
+            commands.spawn((
+                Mesh3d(placeholder),
+                MeshMaterial3d(placeholder_mat),
+                transform,
+                GzSceneEntity {
+                    gz_name: visual_name.to_string(),
+                },
+            ));
+        }
+
+        // ── Unknown ──────────────────────────────────────────────────────────
+        _ => {
+            warn!(
+                "Visual '{}': unrecognised mesh extension '{}' for file '{}'. Skipping.",
+                visual_name, ext, filename
+            );
+        }
+    }
+}
+
 // ===== Conversion helpers =====
 
 fn gz_color_to_bevy(color: &gz_msgs::Color) -> Color {
@@ -398,16 +670,31 @@ fn gz_pose_to_transform(pose: Option<&gz_msgs::Pose>) -> Transform {
         return Transform::IDENTITY;
     };
 
+    // Gazebo: Z is Up, X is Forward, Y is Left.
+    // Bevy:   Y is Up, X is Right, Z backward.
+    //
+    // The coordinate basis change is a -90° rotation around X:
+    //   bevy.x = gz.x,  bevy.y = gz.z,  bevy.z = -gz.y
+    //
+    // For positions this is a simple component remap.
+    // For quaternions we must apply the similarity transform:
+    //   Q_bevy = Rx(-90°) × Q_gz × Rx(+90°)
+    // Simply swapping quaternion components (x,z,-y,w) is incorrect and
+    // produces wrong orientations for any non-trivial rotation.
     let translation = pose
         .position
         .as_ref()
-        .map(|p| Vec3::new(p.x as f32, p.y as f32, p.z as f32))
+        .map(|p| Vec3::new(p.x as f32, p.z as f32, -p.y as f32))
         .unwrap_or(Vec3::ZERO);
 
+    let gz_to_bevy = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
     let rotation = pose
         .orientation
         .as_ref()
-        .map(|q| Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32).normalize())
+        .map(|q| {
+            let q_gz = Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32);
+            (gz_to_bevy * q_gz * gz_to_bevy.inverse()).normalize()
+        })
         .unwrap_or(Quat::IDENTITY);
 
     Transform {
