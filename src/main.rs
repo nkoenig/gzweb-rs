@@ -121,6 +121,7 @@ fn setup(
             // Explicitly set a white clear color for this camera. This ensures its
             // background is not affected by scene-wide background color changes.
             clear_color: ClearColorConfig::Custom(Color::WHITE),
+            ..default()
         },
         Transform::from_xyz(0.0, 5.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
         PanOrbitCamera {

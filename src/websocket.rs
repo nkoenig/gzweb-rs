@@ -215,18 +215,11 @@ fn parse_binary_message(
                             Ok(pose_v) => {
                                 let pose_v: crate::gz_msgs::PoseV = pose_v;
                                 for p in &pose_v.pose {
-                                    let translation = p.position.as_ref().map(|pos| {
-                                        Vec3::new(pos.x as f32, pos.z as f32, -pos.y as f32)
-                                    }).unwrap_or(Vec3::ZERO);
-                                    let gz_to_bevy = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-                                    let rotation = p.orientation.as_ref().map(|q| {
-                                        let q_gz = Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32);
-                                        (gz_to_bevy * q_gz * gz_to_bevy.inverse()).normalize()
-                                    }).unwrap_or(Quat::IDENTITY);
+                                    let transform = crate::scene::gz_pose_to_transform(Some(p));
                                     ws.dynamic_poses.push(DynamicPoseMessage {
                                         name: p.name.clone(),
-                                        translation,
-                                        rotation,
+                                        translation: transform.translation,
+                                        rotation: transform.rotation,
                                     });
                                 }
                             }

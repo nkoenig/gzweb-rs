@@ -665,7 +665,7 @@ fn gz_color_to_bevy(color: &gz_msgs::Color) -> Color {
     Color::srgba(color.r, color.g, color.b, color.a)
 }
 
-fn gz_pose_to_transform(pose: Option<&gz_msgs::Pose>) -> Transform {
+pub fn gz_pose_to_transform(pose: Option<&gz_msgs::Pose>) -> Transform {
     let Some(pose) = pose else {
         return Transform::IDENTITY;
     };
