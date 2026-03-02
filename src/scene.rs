@@ -159,7 +159,7 @@ pub fn apply_dynamic_poses(
     for pose in &poses {
         let mut found = false;
         for (entity, mut transform) in query.iter_mut() {
-            // Match by exact name or by the last segment after '::' (link name within model)
+            // Match by exact name.
             if entity.gz_name == pose.name {
                 transform.translation = pose.translation;
                 transform.rotation = pose.rotation;
