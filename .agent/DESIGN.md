@@ -62,7 +62,7 @@ The same codebase targets **WASM** and **native** using Rust's `cfg` conditional
 |----------|------|---------|
 | `GzWebSocket` | `NonSendResource` | WebSocket state; **must be NonSend** (contains JS callbacks on WASM) |
 | `SceneState` | `Resource` | Scene loading state machine |
-| `AmbientLight` | `Resource` | Set from gz scene data |
+| `GlobalAmbientLight` | `Resource` | Set from gz scene data (Bevy 0.18+) |
 | `ClearColor` | `Resource` | Background colour from gz scene |
 
 > **IMPORTANT**: `GzWebSocket` must always be registered as a `NonSendResource` (`world.insert_non_send_resource(...)`) and accessed via `Option<NonSendMut<GzWebSocket>>`. This is required because the WASM `web_sys::WebSocket` is not `Send`.
@@ -184,7 +184,31 @@ gz::Scene
 | Plane | `Plane3d` |
 | Capsule | `Capsule3d` |
 | Cone | `Cone` |
-| Mesh | ⚠️ Not yet implemented |
+| Mesh (.glb/.gltf) | `SceneRoot` via `AssetServer` |
+| Mesh (.stl) | `Mesh3d` via `AssetServer` |
+| Mesh (.obj) | `SceneRoot` via `AssetServer` |
+| Mesh (.dae) | ⚠️ Hot-pink placeholder (Collada not supported) |
+
+### Mesh Loading
+
+External mesh files are loaded asynchronously via Bevy's `AssetServer`.
+
+**Plugins registered** (in `main.rs`):
+- `bevy_obj::ObjPlugin` — Wavefront OBJ + MTL loader (v0.18.2)
+- `bevy_stl::StlPlugin` — STL loader (v0.18.0)
+- glTF/GLB is built into `DefaultPlugins` (`bevy_gltf`)
+
+**URI resolution** (`resolve_mesh_uri` in `scene.rs`):
+
+| Gazebo URI | AssetServer path |
+|---|---|
+| `model://pkg/meshes/foo.stl` | `assets/pkg/meshes/foo.stl` |
+| `file:///abs/path/foo.glb` | `assets/foo.glb` (filename only) |
+| bare path | passed through |
+
+**WASM serving**: For WASM targets, `AssetServer` fetches assets via HTTP. Gazebo model files must be available under `/assets/<pkg>/...` beside the web app.
+
+Collada (`.dae`) conversion to glTF is the recommended workaround: use Blender or `assimp`.
 
 ### Coordinate Transforms
 
@@ -210,6 +234,7 @@ Materials are mapped from `gz.msgs.Material` to Bevy `StandardMaterial` (PBR):
 - On native, wgpu selects Vulkan/Metal/DX12 automatically.
 - The GPU backend is displayed in the HUD (green = modern API, blue = WebGL, yellow = other).
 - Release profile uses `opt-level = "s"`, `lto = true`, `codegen-units = 1` for compact WASM size.
+- **Bevy 0.18** / **wgpu 27.0.1** — upgrade complete.
 
 Do **not** remove the `webgpu` Bevy feature — it is a hard project requirement.
 
@@ -226,7 +251,7 @@ Two parallel overlay systems exist:
 
 ## Known Limitations & Future Work
 
-- **Mesh loading**: `gz::geometry::Mesh` (external `.dae`/`.obj` files) is not yet implemented.
+- **Mesh loading (DAE only)**: Collada (`.dae`) is not natively supported; converts to a hot-pink placeholder. Use glTF instead.
 - **Dynamic updates**: Only the initial scene load is handled. Live entity updates (model pose changes, spawns/deletions) are not yet supported.
 - **Coordinate system**: Potential Y/Z axis swap between Gazebo (Z-up) and Bevy (Y-up) not yet applied.
 - **Authentication**: Partial support — handles `authorized`/`invalid` messages but no credential input UI.

@@ -10,6 +10,18 @@ use web_sys::{MessageEvent, ErrorEvent, CloseEvent};
 
 use crate::scene::SceneState;
 
+/// Event fired when a dynamic pose update arrives from the Gazebo server.
+/// Contains decoded pose data for one entity.
+#[derive(Event, Clone, Debug)]
+pub struct DynamicPoseMessage {
+    /// Gazebo entity name (e.g. "ground_plane::link" or "my_robot")
+    pub name: String,
+    /// World position (already converted from Gazebo Z-up to Bevy Y-up)
+    pub translation: Vec3,
+    /// Orientation (already converted)
+    pub rotation: Quat,
+}
+
 /// Represents a message received from the websocket.
 #[derive(Debug)]
 pub enum WsMessage {
@@ -30,6 +42,8 @@ pub struct GzWebSocket {
     pub protos: Option<String>,
     /// Binary scene data received from the websocket, ready for processing.
     pub scene_data: Option<Vec<u8>>,
+    /// Decoded dynamic pose messages waiting to be applied.
+    pub dynamic_poses: Vec<DynamicPoseMessage>,
 }
 
 impl GzWebSocket {
@@ -62,6 +76,7 @@ pub fn update_websocket_status(
     websocket: Option<NonSendMut<GzWebSocket>>,
     mut query: Query<(&mut Text, &mut TextColor), With<WebsocketStatusText>>,
     mut scene_state: ResMut<SceneState>,
+    asset_store: Res<crate::asset_proxy::WsAssetResponseStore>,
 ) {
     if let Some(mut ws) = websocket {
         // Check for new messages from the receiver
@@ -72,7 +87,7 @@ pub fn update_websocket_status(
                         ws.status = txt.replace("STATUS:", "").trim().to_string();
                     } else if txt == "authorized" {
                         info!("Received authorized message, re-requesting protos");
-                        let request = serde_json::json!(["protos", "", "", ""]).to_string();
+                        let request = "protos,,,".to_string();
                         if let Err(e) = ws.send_message(&request) {
                             error!("Failed to send protos request: {}", e);
                         }
@@ -92,7 +107,26 @@ pub fn update_websocket_status(
                     }
                 }
                 WsMessage::Binary(data) => {
-                    parse_binary_message(&data, &mut ws, &mut scene_state);
+                    // Gazebo WS server sends proto definitions as Binary frames.
+                    // Check if the data is actually text (proto defs, auth responses)
+                    // before treating it as a binary protobuf frame.
+                    if let Ok(text) = std::str::from_utf8(&data) {
+                        let trimmed = text.trim();
+                        if trimmed.starts_with("syntax") || trimmed.starts_with("package") {
+                            // Proto definitions
+                            if ws.protos.is_none() {
+                                info!("Received protobuf definitions via binary frame (length: {})", data.len());
+                                ws.protos = Some(text.to_string());
+                                ws.status = "Protos Received".to_string();
+                            }
+                            continue;
+                        } else if trimmed == "authorized" || trimmed == "invalid" {
+                            // Auth responses that arrived as binary
+                            let _ = ws.receiver.try_recv(); // already consumed
+                            continue;
+                        }
+                    }
+                    parse_binary_message(&data, &mut ws, &mut scene_state, &asset_store);
                 }
             }
         }
@@ -120,10 +154,15 @@ pub fn update_websocket_status(
 
 /// Parse a binary websocket message with the gz-transport frame format:
 /// `operation,topic,msgType,<protobuf payload>`
+///
+/// For "asset" operations, the payload is raw file bytes which are inserted
+/// into the shared `WsAssetResponseStore` so that `WsAssetReader` can pick
+/// them up.
 fn parse_binary_message(
     data: &[u8],
     ws: &mut GzWebSocket,
     scene_state: &mut SceneState,
+    asset_store: &crate::asset_proxy::WsAssetResponseStore,
 ) {
     // Find the first three commas to split the header
     let mut comma_positions = Vec::new();
@@ -145,11 +184,6 @@ fn parse_binary_message(
     let topic = std::str::from_utf8(&data[comma_positions[0] + 1..comma_positions[1]]).unwrap_or("");
     let msg_type = std::str::from_utf8(&data[comma_positions[1] + 1..comma_positions[2]]).unwrap_or("");
     let payload = &data[comma_positions[2] + 1..];
-
-    info!(
-        "Binary msg: op='{}', topic='{}', type='{}', payload={} bytes",
-        operation, topic, msg_type, payload.len()
-    );
 
     match operation {
         "pub" => {
@@ -175,12 +209,49 @@ fn parse_binary_message(
                     ws.status = "Scene Received, Processing...".to_string();
                 }
                 _ => {
-                    info!("Unhandled pub topic: '{}'", topic);
+                    // Check for dynamic pose topic (full path ends with dynamic_pose/info)
+                    if topic.ends_with("dynamic_pose/info") {
+                        match prost::Message::decode(payload) {
+                            Ok(pose_v) => {
+                                let pose_v: crate::gz_msgs::PoseV = pose_v;
+                                for p in &pose_v.pose {
+                                    let transform = crate::scene::gz_pose_to_transform(Some(p));
+                                    ws.dynamic_poses.push(DynamicPoseMessage {
+                                        name: p.name.clone(),
+                                        translation: transform.translation,
+                                        rotation: transform.rotation,
+                                    });
+                                }
+                            }
+                            Err(e) => warn!("Failed to decode Pose_V: {:?}", e),
+                        }
+                    }
+                    // All other subscribed topics are suppressed
                 }
             }
         }
+        "asset" => {
+            // Asset response from the server.
+            // Frame: "asset,<uri>,<msgType>,<payload bytes>"
+            // 'topic' field contains the URI that was requested.
+            if topic.is_empty() {
+                warn!("Asset response missing URI");
+                return;
+            }
+
+            // Check for error responses (StringMsg = error message)
+            if msg_type == "gazebo.msgs.StringMsg" || msg_type == "ignition.msgs.StringMsg" {
+                let error_str = std::str::from_utf8(payload).unwrap_or("unknown error");
+                warn!("Asset error for '{}': {}", topic, error_str);
+                return;
+            }
+
+            // Success: store the raw bytes for WsAssetReader to pick up
+            info!("Asset received: '{}' ({} bytes)", topic, payload.len());
+            asset_store.0.lock().unwrap().insert(topic.to_string(), payload.to_vec());
+        }
         _ => {
-            info!("Unhandled binary operation: '{}'", operation);
+            // Suppress unhandled operations to avoid flooding logs
         }
     }
 }
@@ -291,7 +362,7 @@ fn setup_websocket_native(world: &mut World, url: &str) {
         };
 
         // Send initial protos request
-        let request = serde_json::json!(["protos", "", "", ""]).to_string();
+        let request = "protos,,,".to_string();
         if let Err(e) = socket.send(Message::Text(request.into())) {
             error!("Failed to send protos request: {:?}", e);
             return;
@@ -356,6 +427,7 @@ fn setup_websocket_native(world: &mut World, url: &str) {
         status: format!("Connecting to {}...", url),
         protos: None,
         scene_data: None,
+        dynamic_poses: Vec::new(),
     });
 }
 
@@ -380,7 +452,7 @@ fn setup_websocket_wasm(world: &mut World, url: &str) {
             let on_open = Closure::<dyn FnMut()>::new(move || {
                 let _ = tx_open.send(WsMessage::Text("STATUS: Connected".to_string()));
 
-                let request = serde_json::json!(["protos", "", "", ""]).to_string();
+                let request = "protos,,,".to_string();
                 match ws_clone.send_with_str(&request) {
                     Ok(_) => info!("Sent protos request"),
                     Err(e) => error!("Failed to send protos request: {:?}", e),
@@ -440,6 +512,7 @@ fn setup_websocket_wasm(world: &mut World, url: &str) {
                 status: format!("Connecting to {}...", url_str),
                 protos: None,
                 scene_data: None,
+                dynamic_poses: Vec::new(),
             });
         }
         Err(e) => {
@@ -451,6 +524,7 @@ fn setup_websocket_wasm(world: &mut World, url: &str) {
                 status: "Failed to Create Socket".to_string(),
                 protos: None,
                 scene_data: None,
+                dynamic_poses: Vec::new(),
             });
         }
     }

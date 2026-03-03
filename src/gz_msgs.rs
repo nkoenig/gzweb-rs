@@ -754,3 +754,13 @@ pub struct StringMsgV {
     #[prost(string, repeated, tag = "2")]
     pub data: Vec<String>,
 }
+
+// ===== Pose_V (for dynamic_pose/info) =====
+
+#[derive(Clone, PartialEq, Message)]
+pub struct PoseV {
+    #[prost(message, optional, tag = "1")]
+    pub header: Option<Header>,
+    #[prost(message, repeated, tag = "2")]
+    pub pose: Vec<Pose>,
+}

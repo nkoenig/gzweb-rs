@@ -17,6 +17,30 @@ A Rust/Bevy application that connects to a Gazebo simulation via WebSocket, dese
 - `wasm32-unknown-unknown` target (for WASM builds): `rustup target add wasm32-unknown-unknown`
 - A running [Gazebo](https://gazebosim.org/) simulation with the websocket server plugin
 
+## Running Gazebo (Docker)
+
+To easily run a Gazebo Harmonic simulation with the websocket server enabled, you can use the provided `Dockerfile.gazebo`. This creates an isolated environment with Gazebo configured to expose its websocket server on port `9002`, which is required for this application to connect.
+
+### Build the Image
+
+```bash
+docker build -t gz-websocket -f Dockerfile.gazebo .
+```
+
+### Run the Container
+
+You can start the simulation by running the container. By default, it will load `empty.sdf`:
+
+```bash
+docker run --rm -p 9002:9002 gz-websocket
+```
+
+To specify a different world (e.g., `shapes.sdf`), pass it as an argument:
+
+```bash
+docker run --rm -p 9002:9002 gz-websocket shapes.sdf
+```
+
 ## Building
 
 ### Native (Desktop)

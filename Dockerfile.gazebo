@@ -1,0 +1,45 @@
+# Use Ubuntu 22.04 as the base image
+FROM ubuntu:22.04
+
+LABEL maintainer="Gazebo-Web/Rs"
+LABEL description="Gazebo Harmonic with Websocket Server"
+
+# Disable timezone prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Setup Gazebo repository and install Gazebo Harmonic
+RUN apt-get update \
+ && apt-get install -y wget lsb-release gnupg \
+ && wget https://packages.osrfoundation.org/gazebo.gpg -O /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] http://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/gazebo-stable.list > /dev/null \
+ && apt-get update \
+ && apt-get install -y gz-harmonic \
+ # Clean up to reduce image size \
+ && rm -rf /var/lib/apt/lists/*
+
+# Expose port 9002 for the websocket
+EXPOSE 9002
+
+# Write the start up script and launch file template
+RUN echo '<?xml version="1.0"?>\n\
+<gz version="1.0">\n\
+  <executable name="simulator">\n\
+    <command>gz sim -r -s __WORLD_NAME__</command>\n\
+  </executable>\n\
+  <plugin name="gz::launch::WebsocketServer"\n\
+          filename="gz-launch-websocket-server">\n\
+    <port>9002</port>\n\
+  </plugin>\n\
+</gz>' > /opt/run.gzlaunch.template \
+ && echo '#!/bin/bash\n\
+WORLD=${1:-empty.sdf}\n\
+# Substitute the chosen world into the template\n\
+sed "s|__WORLD_NAME__|$WORLD|g" /opt/run.gzlaunch.template > /tmp/run.gzlaunch\n\
+echo "Starting Gazebo launch with world: $WORLD"\n\
+# Launch gazebo\n\
+exec gz launch /tmp/run.gzlaunch\n\
+' > /opt/entrypoint.sh \
+ && chmod +x /opt/entrypoint.sh
+
+# Run the entrypoint script
+ENTRYPOINT ["/opt/entrypoint.sh"]
