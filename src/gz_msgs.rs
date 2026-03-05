@@ -764,3 +764,97 @@ pub struct PoseV {
     #[prost(message, repeated, tag = "2")]
     pub pose: Vec<Pose>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+
+    #[test]
+    fn test_scene_parsing_roundtrip() {
+        let mut original_scene = Scene {
+            header: None,
+            name: "test_scene".to_string(),
+            ambient: None,
+            background: None,
+            sky: None,
+            shadows: false,
+            fog: None,
+            grid: false,
+            model: vec![],
+            light: vec![],
+            joint: vec![],
+            origin_visual: false,
+        };
+        
+        let mut model = Model {
+            header: None,
+            name: "test_model".to_string(),
+            id: 1,
+            is_static: false,
+            pose: None,
+            joint: vec![],
+            link: vec![],
+            deleted: false,
+            visual: vec![],
+            scale: None,
+            self_collide: false,
+            model: vec![],
+            bounding_box: None,
+        };
+        
+        let mut visual = Visual {
+            header: None,
+            name: "test_visual".to_string(),
+            id: 2,
+            parent_name: "test_model".to_string(),
+            parent_id: 1,
+            cast_shadows: true,
+            transparency: 0.0,
+            laser_retro: 0.0,
+            pose: None,
+            geometry: None,
+            material: None,
+            visible: true,
+            delete_me: false,
+            is_static: false,
+            plugin: vec![],
+            scale: None,
+            meta: None,
+            r#type: visual::Type::Visual as i32,
+        };
+        
+        let geom = Geometry {
+            header: None,
+            r#type: geometry::Type::Box as i32,
+            r#box: Some(BoxGeom {
+                header: None,
+                size: Some(Vector3d { header: None, x: 1.0, y: 2.0, z: 3.0 }),
+            }),
+            cylinder: None,
+            plane: None,
+            sphere: None,
+            image: None,
+            heightmap: None,
+            mesh: None,
+            cone: None,
+            points: vec![],
+            polyline: vec![],
+            capsule: None,
+            ellipsoid: None,
+        };
+        
+        visual.geometry = Some(geom);
+        model.visual.push(visual);
+        original_scene.model.push(model);
+
+        // Encode to bytes
+        let mut buf = Vec::new();
+        original_scene.encode(&mut buf).expect("Failed to encode scene");
+
+        // Decode back
+        let decoded_scene = Scene::decode(buf.as_slice()).expect("Failed to decode scene");
+
+        assert_eq!(decoded_scene, original_scene);
+    }
+}

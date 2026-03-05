@@ -529,3 +529,63 @@ fn setup_websocket_wasm(world: &mut World, url: &str) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_port_default() {
+        // Just checking it doesn't panic and returns a string
+        let port = resolve_port();
+        assert!(!port.is_empty());
+    }
+
+    #[test]
+    fn test_parse_binary_message_short() {
+        // Setup dummy state
+        let dummy_rx = crossbeam_channel::bounded(1).1;
+        let mut ws = GzWebSocket {
+            receiver: dummy_rx,
+            cmd_sender: None,
+            #[cfg(target_arch = "wasm32")]
+            socket: None,
+            status: "test".to_string(),
+            protos: None,
+            scene_data: None,
+            dynamic_poses: Vec::new(),
+        };
+        let mut scene_state = SceneState::default();
+        let asset_store_resource = crate::asset_proxy::WsAssetResponseStore::default();
+
+        let short_data = b"short,data";
+        
+        // This should return early without panicking
+        parse_binary_message(short_data, &mut ws, &mut scene_state, &asset_store_resource);
+        assert_eq!(ws.status, "test");
+    }
+
+    #[test]
+    fn test_parse_binary_message_scene() {
+        // Setup dummy state
+        let dummy_rx = crossbeam_channel::bounded(1).1;
+        let mut ws = GzWebSocket {
+            receiver: dummy_rx,
+            cmd_sender: None,
+            #[cfg(target_arch = "wasm32")]
+            socket: None,
+            status: "test".to_string(),
+            protos: None,
+            scene_data: None,
+            dynamic_poses: Vec::new(),
+        };
+        let mut scene_state = SceneState::default();
+        let asset_store_resource = crate::asset_proxy::WsAssetResponseStore::default();
+
+        let payload = b"pub,scene,msgType,dummy_payload_bytes_here";
+        
+        parse_binary_message(payload, &mut ws, &mut scene_state, &asset_store_resource);
+        assert_eq!(ws.status, "Scene Received, Processing...");
+        assert_eq!(ws.scene_data.as_ref().unwrap(), b"dummy_payload_bytes_here");
+    }
+}
