@@ -855,18 +855,6 @@ mod tests {
         // Decode back
         let decoded_scene = Scene::decode(buf.as_slice()).expect("Failed to decode scene");
 
-        assert_eq!(decoded_scene.name, "test_scene");
-        assert_eq!(decoded_scene.model.len(), 1);
-        assert_eq!(decoded_scene.model[0].name, "test_model");
-        assert_eq!(decoded_scene.model[0].visual.len(), 1);
-        
-        let decoded_geom = decoded_scene.model[0].visual[0].geometry.as_ref().unwrap();
-        assert_eq!(decoded_geom.r#type, geometry::Type::Box as i32);
-        
-        let decoded_box = decoded_geom.r#box.as_ref().unwrap();
-        let box_size = decoded_box.size.as_ref().unwrap();
-        assert_eq!(box_size.x, 1.0);
-        assert_eq!(box_size.y, 2.0);
-        assert_eq!(box_size.z, 3.0);
+        assert_eq!(decoded_scene, original_scene);
     }
 }
